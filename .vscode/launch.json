@@ -1,0 +1,24 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        
+        {
+            "name": "Django debug",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/manage.py",
+            // 运行命令行参数，可以自行调整
+            "args": [
+                "runserver",
+                "0.0.0.0:8000"
+            ],
+            // 告诉VSCode这是Django项目
+            "django": true,
+            // 调试时的控制台
+            "console": "integratedTerminal",
+
+            // **关键：显式指定使用哪一个 Python，可用于替代 pythonPath（较新版本用 "python" 字段）**
+            "python": "/Users/wanghanlin/resume/bin/python"
+        }
+    ]
+}
