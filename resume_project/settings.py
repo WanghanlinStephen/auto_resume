@@ -25,7 +25,6 @@ SECRET_KEY = 'django-insecure-#926!abk&*)@ps0xv7#oq)^@m8h2ad*7#(4d3c6adx#(_s-&v2
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
 
 
 # Application definition
@@ -38,6 +37,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'resume_app',
+    'corsheaders'
 ]
 
 MIDDLEWARE = [
@@ -48,7 +48,34 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
+    'resume_app.middleware.JWTAuthenticationMiddleware'
 ]
+
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",  # 允许 React 本地开发环境访问
+    "http://127.0.0.1:3000",
+]
+
+CORS_ALLOW_METHODS = [
+    "GET",
+    "POST",
+    "PUT",  # ✅ 添加 PUT 方法
+    "OPTIONS",
+]
+
+
+ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
+
+
+CORS_ALLOW_HEADERS = [
+    "authorization",
+    "content-type",
+    "x-csrftoken",
+]
+
+CORS_ALLOW_CREDENTIALS = True
+
 X_FRAME_OPTIONS = 'SAMEORIGIN'
 
 ROOT_URLCONF = 'resume_project.urls'
@@ -128,3 +155,5 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "your-fallback-secret-key")

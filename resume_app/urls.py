@@ -2,8 +2,11 @@ from django.urls import path
 from . import views
 
 urlpatterns = [
-    path('', views.resume_modify_view, name='resume_form'),
-    path('result/', views.resume_result_view, name='resume_result'),
-    path("download_pdf/", views.download_pdf_view, name="download_pdf"),
-    path("download_word/", views.download_word_view, name="download_word")
+    # 注册登陆
+    path('register/',views.register, name='regsiter'),
+    path('login/',views.login, name='login'),
+    path("profile/", views.profile, name="profile"),
+
+    path('result/',views.modify_resume, name='resume_result'),
+    path("download_pdf/", views.download_pdf, name="download_pdf"),
 ]
