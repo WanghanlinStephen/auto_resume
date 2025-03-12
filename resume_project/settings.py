@@ -37,8 +37,35 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'resume_app',
-    'corsheaders'
+    'corsheaders',
+    'django.contrib.sites',
+    'payments',
+    'rest_framework',
+    'django_extensions'
+
 ]
+
+PAYMENT_VARIANTS = {
+    'default': ('payments.dummy.DummyProvider', {}),
+    'alipay': ('your_project.payments.AlipayProvider', {
+        'app_id': 'your_alipay_app_id',
+        'app_notify_url': 'your_notify_url',
+        'app_private_key_path': 'path_to_your_private_key.pem',
+        'alipay_public_key_path': 'path_to_alipay_public_key.pem',
+        'return_url': 'your_return_url',
+        'debug': True,  # 沙箱环境
+    }),
+    'wechat': ('your_project.payments.WeChatPayProvider', {
+        'appid': 'your_wechat_appid',
+        'mch_id': 'your_merchant_id',
+        'api_key': 'your_api_key',
+        'notify_url': 'your_notify_url',
+    }),
+    'stripe': ('payments.stripe.StripeProvider', {
+        'secret_key': 'your_stripe_secret_key',
+        'public_key': 'your_stripe_public_key',
+    }),
+}
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -157,3 +184,7 @@ MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "your-fallback-secret-key")
+
+PAYMENT_HOST = "http://localhost:8000"  # 或者你的生产环境域名
+SITE_ID = 1
+APPEND_SLASH = False

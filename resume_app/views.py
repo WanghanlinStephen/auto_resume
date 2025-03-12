@@ -7,12 +7,29 @@ import os
 from .utils import generate_pdf_from_html,generate_html_from_json_resume,modify_resume_with_chatgpt,parse_resume_file,parse_modified_resume_to_json
 from django.contrib.auth.models import User
 import jwt
-import datetime
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 import json
 from django.contrib.auth import authenticate
 from django.conf import settings
+from rest_framework.viewsets import ModelViewSet
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from .models import AlipayOrder, WeChatOrder, StripeOrder
+from .serializers import AlipayOrderSerializer, WeChatOrderSerializer, StripeOrderSerializer
+from .payment.alipay_payment import generate_alipay_url
+from .payment.wechat import generate_wechat_qr
+from .payment.stripe_pay import process_stripe_payment
+import base64
+import pytesseract
+from PIL import Image
+from io import BytesIO
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.parsers import JSONParser
+from rest_framework import status
+
+
 
 SECRET_KEY = settings.SECRET_KEY
 
@@ -317,3 +334,286 @@ def download_pdf(request):
 
     return JsonResponse({"error": "Invalid request method"}, status=405)
 
+
+
+class AlipayViewSet(ModelViewSet):
+    queryset = AlipayOrder.objects.all()
+    serializer_class = AlipayOrderSerializer
+
+    @action(detail=True, methods=['post'])
+    def pay(self, request, pk=None):
+        order = self.get_object()
+        url = generate_alipay_url(order.out_trade_no, order.total_amount)
+        return Response({"pay_url": url})
+
+class WeChatViewSet(ModelViewSet):
+    queryset = WeChatOrder.objects.all()
+    serializer_class = WeChatOrderSerializer
+
+    @action(detail=True, methods=['post'])
+    def pay(self, request, pk=None):
+        order = self.get_object()
+        qr_code = generate_wechat_qr(order.out_trade_no, order.total_fee)
+        return Response({"qr_code": qr_code})
+
+class StripeViewSet(ModelViewSet):
+    queryset = StripeOrder.objects.all()
+    serializer_class = StripeOrderSerializer
+
+    @action(detail=True, methods=['post'])
+    def pay(self, request, pk=None):
+        order = self.get_object()
+        charge = process_stripe_payment(order.charge_id, order.amount)
+        return Response(charge)
+
+
+class ExtractTextView(APIView):
+    parser_classes = [JSONParser]  # 解析 application/json
+
+    def post(self, request, *args, **kwargs):
+        image_data_list = request.data.get("imageDataList", [])
+        programming_language = request.data.get("language", "python")  # ✅ 这是编程语言，不影响 OCR
+
+        if not image_data_list:
+            return Response({"error": "No images provided"}, status=status.HTTP_400_BAD_REQUEST)
+
+        extracted_texts = []
+
+        try:
+            for image_base64 in image_data_list:
+                # ✅ 解码 Base64 图片
+                image_bytes = base64.b64decode(image_base64)
+                image = Image.open(BytesIO(image_bytes))
+
+                # ✅ 强制 OCR 解析语言为 "eng"（无论前端传什么）
+                extracted_text = pytesseract.image_to_string(image, lang="eng")
+                extracted_texts.append({
+                    "code": extracted_text.strip(),  # 移除空白字符
+                    "language": programming_language  # 保留前端传来的编程语言
+                })
+
+            return Response({"results": extracted_texts}, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class GenerateCodeView(APIView):
+    def post(self, request, *args, **kwargs):
+        try:
+            # ✅ 获取 "results" 作为 problem_info
+            results = request.data.get("results", [])
+            language = request.data.get("language", "python")
+
+            # 确保 results 是一个列表
+            if not isinstance(results, list) or not results:
+                return Response({"error": "Invalid or missing 'results' list"}, status=status.HTTP_400_BAD_REQUEST)
+
+            # ✅ 只取 results 里的 code
+            extracted_code = [item.get("code", "") for item in results]
+
+            # 生成代码
+            generated_code = self.leetcode_with_chatgpt(extracted_code, language)
+
+            return Response(generated_code, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+    def leetcode_with_chatgpt(self, extracted_code_list, language):
+        """调用 DeepSeek API 生成代码"""
+        user_input = "\n".join(extracted_code_list)
+        print("调用 Deepseek API 前，用户输入：", user_input)
+
+        api_key = "sk-fa41fb37efaa4a64b126f7ad23456b9a"
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+
+        system_prompt = """你是一个精通算法的 LeetCode 选手，你的任务是优化代码并返回结构化信息。
+       请按照以下 JSON 格式返回：
+       {
+           "code": "<优化后的代码>",
+           "thoughts": "<优化的思路>",
+           "time_complexity": "<时间复杂度分析>",
+           "space_complexity": "<空间复杂度分析>"
+       }"""
+
+        user_prompt = f"请用 {language} 编程语言优化以下代码，并返回 **严格的 JSON 格式**（不包含 ```）：\n{user_input}"
+
+        data = {
+            "model": "deepseek-chat",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "stream": False,
+            "temperature": 0.7,
+            "max_tokens": 5000
+        }
+
+        response = requests.post("https://api.deepseek.com/chat/completions", headers=headers, json=data)
+        print("DeepSeek API 返回状态码：", response.status_code)
+
+        if response.status_code == 200:
+            raw_response = response.json()
+            generated_text = raw_response.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+            print("DeepSeek API 响应数据:", generated_text)
+
+            # **✅ 解析 JSON，去掉可能的 ```json 代码块**
+            try:
+                cleaned_json = generated_text.strip("```json").strip("```").strip()
+                parsed_data = json.loads(cleaned_json)  # **确保是 JSON 对象**
+
+                # **✅ 处理 thoughts 字段，确保返回数组**
+                if isinstance(parsed_data.get("thoughts"), str):
+                    parsed_data["thoughts"] = parsed_data["thoughts"].split("。")  # 按句号拆分成数组
+                    parsed_data["thoughts"] = [t.strip() for t in parsed_data["thoughts"] if t.strip()]  # 去除空字符串
+
+                return parsed_data
+            except Exception as e:
+                print("⚠️ JSON 解析失败:", str(e))
+                return {
+                    "code": "解析失败",
+                    "thoughts": ["DeepSeek 返回的数据无法解析，请检查格式"],
+                    "time_complexity": "未知",
+                    "space_complexity": "未知"
+                }
+        else:
+            raise Exception(f"DeepSeek API 请求失败，状态码：{response.status_code}，响应：{response.text}")
+
+
+
+
+class DebugView(APIView):
+    def post(self, request, *args, **kwargs):
+        try:
+            # ✅ 获取调试所需的参数
+            image_data_list = request.data.get("imageDataList", [])
+            language = request.data.get("language", "python")
+
+            # 确保至少有截图
+            if not isinstance(image_data_list, list) or not image_data_list:
+                return Response({"error": "Invalid or missing 'imageDataList'"}, status=status.HTTP_400_BAD_REQUEST)
+
+            # ✅ 从截图中提取代码
+            extracted_code_list = self.extract_code_from_images(image_data_list)
+
+            if not extracted_code_list:
+                return Response({"error": "无法从截图中提取代码"}, status=status.HTTP_400_BAD_REQUEST)
+
+            # ✅ 生成调试后的优化代码
+            debugged_code = self.leetcode_with_chatgpt(extracted_code_list, language)
+
+            return Response(debugged_code, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def extract_code_from_images(self, image_data_list):
+        """使用 OCR 解析图片，提取代码"""
+        extracted_code_list = []
+
+        for base64_image in image_data_list:
+            try:
+                # ✅ 解析 Base64 图片
+                image_data = base64.b64decode(base64_image)
+                image = Image.open(BytesIO(image_data))
+
+                # ✅ 使用 Tesseract OCR 提取文本
+                extracted_text = pytesseract.image_to_string(image)
+
+                # ✅ 过滤出代码部分（只保留代码相关内容）
+                extracted_code = self.clean_extracted_text(extracted_text)
+
+                if extracted_code:
+                    extracted_code_list.append(extracted_code)
+
+            except Exception as e:
+                print(f"⚠️ 图片解析失败: {e}")
+                continue  # 跳过解析失败的图片
+
+        return extracted_code_list
+
+    def clean_extracted_text(self, text):
+        """对 OCR 提取的文本进行处理，保留代码部分"""
+        lines = text.split("\n")
+        code_lines = []
+
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#") or ">>> " in line:  # 忽略注释和 `>>>`
+                continue
+            if "import " in line or "=" in line or "def " in line or "class " in line or "(" in line:
+                code_lines.append(line)
+
+        return "\n".join(code_lines)
+
+    def leetcode_with_chatgpt(self, extracted_code_list, language):
+        """调用 DeepSeek API 进行代码优化调试"""
+        user_input = "\n".join(extracted_code_list)
+        print("调用 DeepSeek API 前，用户输入：", user_input)
+
+        api_key = "sk-fa41fb37efaa4a64b126f7ad23456b9a"
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+
+        system_prompt = """你是一个精通算法的 LeetCode 选手，我给你提供了老代码,现在需要你根据报错信息和老代码进行修改获取出新的代码. thoughts 写出你的改动部分,new code 写出新的代码。
+        请按照以下 JSON 格式返回：
+        {
+            "new_code": "<优化后的代码>",
+            "thoughts": "<优化的思路>",
+            "time_complexity": "<时间复杂度分析>",
+            "space_complexity": "<空间复杂度分析>"
+        }"""
+
+        user_prompt = f"请用 {language} 编程语言优化以下代码，并返回 **严格的 JSON 格式**（不包含 ```）：\n{user_input}"
+
+        data = {
+            "model": "deepseek-chat",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "stream": False,
+            "temperature": 0.7,
+            "max_tokens": 5000
+        }
+
+        response = requests.post("https://api.deepseek.com/chat/completions", headers=headers, json=data)
+        print("DeepSeek API 返回状态码：", response.status_code)
+
+        if response.status_code == 200:
+            raw_response = response.json()
+            generated_text = raw_response.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+            print("DeepSeek API 响应数据:", generated_text)
+
+            # **✅ 解析 JSON，去掉可能的 ```json 代码块**
+            try:
+                cleaned_json = generated_text.strip("```json").strip("```").strip()
+                parsed_data = json.loads(cleaned_json)  # **确保是 JSON 对象**
+
+                # **✅ 处理 thoughts 字段，确保返回数组**
+                if isinstance(parsed_data.get("thoughts"), str):
+                    parsed_data["thoughts"] = parsed_data["thoughts"].split("。")  # 按句号拆分成数组
+                    parsed_data["thoughts"] = [t.strip() for t in parsed_data["thoughts"] if t.strip()]  # 去除空字符串
+
+                return parsed_data
+            except Exception as e:
+                print("⚠️ JSON 解析失败:", str(e))
+                return {
+                    "new_code": "解析失败",
+                    "thoughts": ["DeepSeek 返回的数据无法解析，请检查格式"],
+                    "time_complexity": "未知",
+                    "space_complexity": "未知"
+                }
+        else:
+            raise Exception(f"DeepSeek API 请求失败，状态码：{response.status_code}，响应：{response.text}")

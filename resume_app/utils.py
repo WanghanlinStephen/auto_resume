@@ -7,6 +7,8 @@ from playwright.async_api import async_playwright
 from pdf2docx import Converter  # 新增 pdf2docx
 import json
 import os
+from django.shortcuts import render, redirect
+from payments import get_payment_model, RedirectNeeded
 
 def generate_resume_prompt(user_input,customized_info):
     """
@@ -173,7 +175,7 @@ def modify_resume_with_chatgpt(user_input, customized_info):
         ],
         "stream": False,
         "temperature": 0.7,
-        "max_tokens": 3000
+        "max_tokens": 5000
     }
 
     response = requests.post("https://api.deepseek.com/chat/completions", headers=headers, json=data)
@@ -250,7 +252,12 @@ def generate_html_from_json_resume(json_resume, theme="flat"):
 
     THEME_PATHS = {
         'flat': 'jsonresume-theme-flat',
-        'professional': os.path.join(settings.BASE_DIR, "node_modules", "jsonresume-theme-professional", "build")
+        'kendall': 'jsonresume-theme-kendall',
+        'macchiato': 'jsonresume-theme-macchiato',
+        'relaxed': 'jsonresume-theme-relaxed',
+        'stackoverflow': 'jsonresume-theme-stackoverflow',
+        'professional': os.path.join(settings.BASE_DIR, "node_modules", "jsonresume-theme-professional", "build"),
+        'engineering' : os.path.join(settings.BASE_DIR, "node_modules", "jsonresume-theme-engineering")
     }
     selected_theme_path = THEME_PATHS.get(theme, 'jsonresume-theme-flat')
     print("使用主题路径：", selected_theme_path)

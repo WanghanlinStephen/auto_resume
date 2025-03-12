@@ -10,7 +10,11 @@
   "license": "ISC",
   "dependencies": {
     "jsonresume-theme-flat": "^0.3.7",
+    "jsonresume-theme-kendall": "^0.2.0",
+    "jsonresume-theme-macchiato": "^1.1.0",
     "jsonresume-theme-professional": "^1.1.0",
+    "jsonresume-theme-relaxed": "^0.1.11",
+    "jsonresume-theme-stackoverflow": "^2.1.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "styled-components": "^6.1.15"
