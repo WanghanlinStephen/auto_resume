@@ -76,6 +76,7 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'corsheaders.middleware.CorsMiddleware',
+    "middleware.redis_middleware.RedisMiddleware",
     'resume_app.middleware.JWTAuthenticationMiddleware'
 ]
 
@@ -188,3 +189,11 @@ SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "your-fallback-secret-key")
 PAYMENT_HOST = "http://localhost:8000"  # 或者你的生产环境域名
 SITE_ID = 1
 APPEND_SLASH = False
+
+# 限流策略
+RATE_LIMIT_HOURLY = 10
+RATE_LIMIT_DAILY = 30
+
+# Redis 连接信息
+REDIS_HOST = "localhost"
+REDIS_PORT = 6379

@@ -20,9 +20,9 @@ urlpatterns = [
     path("download_pdf/", views.download_pdf, name="download_pdf"),
 
     # 支付相关
-    path('alipay/<int:pk>/pay/', AlipayViewSet.as_view({'post': 'pay'}), name='alipay_pay'),
-    path('wechat/<int:pk>/pay/', WeChatViewSet.as_view({'post': 'pay'}), name='wechat_pay'),
-    path('stripe/<int:pk>/pay/', StripeViewSet.as_view({'post': 'pay'}), name='stripe_pay'),
+    # path('alipay/<int:pk>/pay/', AlipayViewSet.as_view({'post': 'pay'}), name='alipay_pay'),
+    # path('wechat/<int:pk>/pay/', WeChatViewSet.as_view({'post': 'pay'}), name='wechat_pay'),
+    # path('stripe/<int:pk>/pay/', StripeViewSet.as_view({'post': 'pay'}), name='stripe_pay'),
 
     # auto-interview API
     path('extract/', ExtractTextView.as_view(), name='extract_text'),

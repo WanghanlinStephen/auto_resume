@@ -1,10 +1,10 @@
 
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
 from .aws_config import s3_client, AWS_STORAGE_BUCKET_NAME, S3_BASE_URL
 import os
-from .utils import generate_pdf_from_html,generate_html_from_json_resume,modify_resume_with_chatgpt,parse_resume_file,parse_modified_resume_to_json
+from .utils import generate_pdf_from_html,generate_html_from_json_resume,modify_resume_with_chatgpt,parse_resume_file,parse_modified_resume_to_json,generate_pdf_from_json_resume,check_rate_limit
 from django.contrib.auth.models import User
 import jwt
 from django.http import JsonResponse
@@ -28,10 +28,34 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.parsers import JSONParser
 from rest_framework import status
+from functools import wraps
 
 
 
 SECRET_KEY = settings.SECRET_KEY
+
+# JWT 认证装饰器
+def login_required(f):
+    """JWT Token 认证装饰器"""
+    @wraps(f)
+    def decorated_function(request, *args, **kwargs):
+        auth_header = request.headers.get("Authorization")  # 获取请求头
+        if not auth_header or not auth_header.startswith("Bearer "):
+            return JsonResponse({"error": "未提供有效 Token，无法访问"}, status=401)
+
+        token = auth_header.split("Bearer ")[1]  # 只取 Token 部分
+        try:
+            payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+            request.user = User.objects.get(id=payload["id"])  # 绑定 user
+        except jwt.ExpiredSignatureError:
+            return JsonResponse({"error": "Token 已过期"}, status=401)
+        except jwt.InvalidTokenError:
+            return JsonResponse({"error": "无效 Token"}, status=401)
+        except User.DoesNotExist:
+            return JsonResponse({"error": "用户不存在"}, status=401)
+
+        return f(request, *args, **kwargs)
+    return decorated_function
 
 @csrf_exempt
 def register(request):
@@ -52,8 +76,8 @@ def register(request):
         # **🔥 创建新用户**
         user = User.objects.create_user(username=username, email=email, password=password)
 
-        # **✅ 直接生成 JWT Token**
-        token = jwt.encode({"id": user.id, "exp": datetime.datetime.utcnow() + datetime.timedelta(days=1)}, SECRET_KEY, algorithm="HS256")
+        # **✅ 生成 JWT Token**
+        token = jwt.encode({"id": user.id, "exp": datetime.utcnow() + timedelta(days=1)}, SECRET_KEY, algorithm="HS256")
 
         return JsonResponse({"message": "注册成功", "token": token}, status=201)
 
@@ -75,12 +99,14 @@ def login(request):
 
         user = authenticate(username=user.username, password=password)
         if user:
-            token = jwt.encode({"id": user.id, "exp": datetime.datetime.utcnow() + datetime.timedelta(days=1)},
+            token = jwt.encode({"id": user.id, "exp": datetime.utcnow() + timedelta(days=1)},
                                SECRET_KEY, algorithm="HS256")
             return JsonResponse({"token": token})
         return JsonResponse({"error": "用户名或密码错误"}, status=400)
 
+
 @csrf_exempt
+@login_required
 def profile(request):
     """ 获取 & 更新用户信息 """
     if not request.user or request.user.is_anonymous:
@@ -113,8 +139,8 @@ def profile(request):
         except Exception as e:
             return JsonResponse({"error": str(e)}, status=400)
 
-
 @csrf_exempt
+@login_required
 def modify_resume(request):
     """
     API: /api/modify_resume_and_generate_html/
@@ -141,56 +167,21 @@ def modify_resume(request):
         - 解析 JSON Resume
         - 生成 HTML 并返回
     """
-    # if request.method == "POST":
-    #     try:
-    #         resume_text = request.POST.get("resume_text", "").strip()
-    #         resume_file = request.FILES.get("resume_file")
-    #         theme = request.POST.get("theme","flat").strip()
-    #         customized_info = request.POST.get("")
-    #
-    #         if not resume_text and resume_file:
-    #             resume_text = parse_resume_file(resume_file)
-    #
-    #         if not resume_text:
-    #             return JsonResponse({"error": "请输入简历内容"}, status=400)
-    #
-    #         # AI 处理简历
-    #         modified_resume = modify_resume_with_chatgpt(resume_text,customized_info)
-    #         json_resume = parse_modified_resume_to_json(modified_resume)
-    #         if not json_resume:
-    #             return JsonResponse({"error": "AI 解析简历失败"}, status=500)
-    #
-    #         # 生成 HTML
-    #         html_content = generate_html_from_json_resume(json_resume,theme)
-    #
-    #         # 生成带日期的文件路径
-    #         current_date = datetime.utcnow().strftime("%Y/%m/%d")  # 按日期存储
-    #         file_name = f"resumes/{current_date}/{uuid.uuid4().hex}.html"
-    #         temp_html_path = os.path.join("/tmp", file_name)  # 临时存储 HTML
-    #
-    #         # **确保目录存在**
-    #         os.makedirs(os.path.dirname(temp_html_path), exist_ok=True)
-    #
-    #         # **写入 HTML 文件**
-    #         with open(temp_html_path, "w", encoding="utf-8") as f:
-    #             f.write(html_content)
-    #
-    #         # **上传到 S3**
-    #         s3_client.upload_file(temp_html_path, AWS_STORAGE_BUCKET_NAME, file_name,
-    #                               ExtraArgs={"ContentType": "text/html"})
-    #
-    #         os.remove(temp_html_path)  # **删除临时文件**
-    #
-    #         html_url = f"{S3_BASE_URL}{file_name}"
-    #         return JsonResponse({"html_url": html_url})
-    #
-    #     except Exception as e:
-    #         return JsonResponse({"error": str(e)}, status=500)
-    #
-    # return JsonResponse({"error": "Invalid request method"}, status=405)
-
     if request.method == "POST":
         try:
+
+            user_id = request.user.id  # 获取当前登录用户的 ID
+            if not user_id:
+                return JsonResponse({"error": "未登录用户"}, status=403)
+
+            redis_client = request.redis_client
+            if redis_client is None:
+                return JsonResponse({"error": "Redis 连接失败"}, status=500)
+
+            allowed, reason = check_rate_limit(user_id, redis_client)
+            if not allowed:
+                return JsonResponse({"error": reason}, status=429)
+
             resume_text = request.POST.get("resume_text", "").strip()
             resume_file = request.FILES.get("resume_file")
             theme = request.POST.get("theme", "flat").strip()
@@ -240,9 +231,11 @@ def modify_resume(request):
             file_uuid = uuid.uuid4().hex
             file_name = f"resumes/{current_date}/{file_uuid}.html"
             preview_file_name = f"resumes/{current_date}/{file_uuid}_preview.html"
+            json_file_name = f"resumes/{current_date}/{file_uuid}.json"
 
             temp_html_path = os.path.join("/tmp", file_name)  # 临时存储 HTML
             temp_preview_path = os.path.join("/tmp", preview_file_name)  # 预览 HTML
+            temp_json_path = os.path.join("/tmp", json_file_name)  # JSON 文件路径
 
             # **确保目录存在**
             os.makedirs(os.path.dirname(temp_html_path), exist_ok=True)
@@ -254,19 +247,27 @@ def modify_resume(request):
             with open(temp_preview_path, "w", encoding="utf-8") as f:
                 f.write(preview_html_content)
 
+            # **写入 JSON 文件**
+            with open(temp_json_path, "w", encoding="utf-8") as f:
+                json.dump(json_resume, f, ensure_ascii=False, indent=4)
+
             # **上传到 S3**
             s3_client.upload_file(temp_html_path, AWS_STORAGE_BUCKET_NAME, file_name,
                                   ExtraArgs={"ContentType": "text/html"})
             s3_client.upload_file(temp_preview_path, AWS_STORAGE_BUCKET_NAME, preview_file_name,
                                   ExtraArgs={"ContentType": "text/html"})
+            s3_client.upload_file(temp_json_path, AWS_STORAGE_BUCKET_NAME, json_file_name,
+                                  ExtraArgs={"ContentType": "application/json"})
 
             os.remove(temp_html_path)  # **删除临时文件**
             os.remove(temp_preview_path)  # **删除预览文件**
+            os.remove(temp_json_path)
 
             html_url = f"{S3_BASE_URL}{file_name}"
             preview_html_url = f"{S3_BASE_URL}{preview_file_name}"
+            json_url = f"{S3_BASE_URL}{json_file_name}"
 
-            return JsonResponse({"html_url": html_url, "preview_html_url": preview_html_url})
+            return JsonResponse({"html_url": html_url, "preview_html_url": preview_html_url, "json_resume":json_url, "theme":theme})
 
         except Exception as e:
             return JsonResponse({"error": str(e)}, status=500)
@@ -274,6 +275,7 @@ def modify_resume(request):
     return JsonResponse({"error": "Invalid request method"}, status=405)
 
 @csrf_exempt
+@login_required
 def download_pdf(request):
     """
     API: /api/download_pdf/
@@ -298,44 +300,183 @@ def download_pdf(request):
         - 存储 PDF 到 S3
         - 返回 PDF 下载 URL
     """
-    if request.method == "POST":
-        try:
-            html_url = request.POST.get("html_url", "").strip()
+    # if request.method == "POST":
+    #     try:
+    #         html_url = request.POST.get("html_url", "").strip()
+    #
+    #         if not html_url:
+    #             return JsonResponse({"error": "缺少 HTML URL"}, status=400)
+    #
+    #         # 下载 HTML 文件
+    #         response = requests.get(html_url)
+    #         if response.status_code != 200:
+    #             return JsonResponse({"error": "无法下载 HTML 文件"}, status=400)
+    #
+    #         html_content = response.text  # 获取 HTML 内容
+    #
+    #         # 生成带日期的文件路径
+    #         current_date = datetime.utcnow().strftime("%Y/%m/%d")  # 按日期存储
+    #         pdf_key = f"resumes/{current_date}/{uuid.uuid4().hex}.pdf"
+    #         temp_pdf_path = os.path.join("/tmp", pdf_key)
+    #
+    #         # 生成 PDF
+    #         generate_pdf_from_html(html_content, temp_pdf_path)
+    #
+    #         # 上传 PDF 到 S3
+    #         s3_client.upload_file(temp_pdf_path, AWS_STORAGE_BUCKET_NAME, pdf_key,
+    #                               ExtraArgs={"ContentType": "application/pdf"})
+    #
+    #         os.remove(temp_pdf_path)  # 删除临时文件
+    #
+    #         pdf_url = f"{S3_BASE_URL}{pdf_key}"
+    #         return JsonResponse({"pdf_url": pdf_url})
+    #
+    #     except Exception as e:
+    #         return JsonResponse({"error": str(e)}, status=500)
+    #
+    # return JsonResponse({"error": "Invalid request method"}, status=405)
+    # if request.method == "POST":
+    #     try:
+    #         json_resume_url = request.POST.get("json_resume", "").strip()  # S3 传来的 JSON Resume URL
+    #         json_resume_url = json_resume_url.strip('"')
+    #         theme = request.POST.get("theme", "flat").strip()
+    #
+    #         if not json_resume_url:
+    #             return JsonResponse({"error": "缺少 JSON Resume 数据"}, status=400)
+    #
+    #         # 解析 S3 路径
+    #         json_resume_key = json_resume_url.replace(S3_BASE_URL, "")  # 提取 S3 文件 Key
+    #         temp_json = os.path.join(settings.BASE_DIR, "resume.json")
+    #
+    #         # 下载 JSON Resume 文件到本地
+    #         s3_client.download_file(AWS_STORAGE_BUCKET_NAME, json_resume_key, temp_json)
+    #
+    #         # 读取 JSON 内容，确保是有效的 JSON 格式
+    #         with open(temp_json, "r", encoding="utf-8") as f:
+    #             json_resume = json.load(f)  # 确保 JSON 可用
+    #
+    #         # 生成 PDF 文件路径
+    #         pdf_key = f"resume.pdf"
+    #         temp_pdf = os.path.join(settings.BASE_DIR, "resume.pdf")  # 先获取目录路径
+    #
+    #         # 主题路径映射（保持不变）
+    #         THEME_PATHS = {
+    #             'flat': 'jsonresume-theme-flat',
+    #             'kendall': 'jsonresume-theme-kendall',
+    #             'macchiato': 'jsonresume-theme-macchiato',
+    #             'relaxed': 'jsonresume-theme-relaxed',
+    #             'stackoverflow': 'jsonresume-theme-stackoverflow',
+    #             'professional': "./node_modules/jsonresume-theme-professional/build",
+    #             'engineering': "./node_modules/jsonresume-theme-engineering"
+    #         }
+    #
+    #         selected_theme_path = THEME_PATHS.get(theme, 'jsonresume-theme-flat')
+    #         print(f"使用主题路径：{selected_theme_path}")
+    #
+    #         # 设置环境变量，确保 `resume-cli` 能找到 `node_modules`
+    #         env = os.environ.copy()
+    #         env["NODE_PATH"] = os.path.join(settings.BASE_DIR, "node_modules")
+    #
+    #         # 使用 `resume export` 生成 PDF
+    #         cmd = [
+    #             "resume", "export", temp_pdf,
+    #             "--theme", selected_theme_path,
+    #             "--format", "pdf",
+    #             temp_json
+    #         ]
+    #
+    #         try:
+    #             print(f"执行命令: {' '.join(cmd)}")
+    #
+    #             result = subprocess.run(
+    #                 cmd,
+    #                 cwd=settings.BASE_DIR,
+    #                 stdout=subprocess.PIPE,
+    #                 stderr=subprocess.PIPE,
+    #                 env=env,
+    #                 check=True
+    #             )
+    #
+    #             # **确保 PDF 生成**
+    #             pdf_wait_time = 0
+    #             max_wait_time = 20  # 最长等待 20 秒
+    #             while not os.path.exists(temp_pdf) and pdf_wait_time < max_wait_time:
+    #                 time.sleep(1)  # 每秒检查一次
+    #                 pdf_wait_time += 1
+    #
+    #             if not os.path.exists(temp_pdf):
+    #                 raise FileNotFoundError(f"resume export 失败，{max_wait_time} 秒后仍未生成 {temp_pdf}")
+    #
+    #             print(f"成功生成 PDF: {temp_pdf}，等待时间: {pdf_wait_time} 秒")
+    #
+    #         except subprocess.CalledProcessError as e:
+    #             raise Exception(f"resume export 失败: {e.stderr.decode()}")
+    #
+    #         except Exception as e:
+    #             raise Exception(f"未知错误: {str(e)}")
+    #         # result = subprocess.run(cmd, cwd=settings.BASE_DIR, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, timeout=30)
+    #
+    #         if result.returncode != 0:
+    #             error_message = result.stderr.decode()
+    #             raise Exception(f"resume CLI error: {error_message}")
+    #
+    #         # 上传 PDF 到 S3
+    #         s3_client.upload_file(temp_pdf, AWS_STORAGE_BUCKET_NAME, pdf_key,
+    #                               ExtraArgs={"ContentType": "application/pdf"})
+    #
+    #         # 清理临时文件
+    #         os.remove(temp_json)
+    #         os.remove(temp_pdf)
+    #
+    #         pdf_url = f"{S3_BASE_URL}{pdf_key}"
+    #         return JsonResponse({"pdf_url": pdf_url})
+    #
+    #     except Exception as e:
+    #         return JsonResponse({"error": str(e)}, status=500)
+    #
+    # return JsonResponse({"error": "Invalid request method"}, status=405)
+    if request.method != "POST":
+        return JsonResponse({"error": "Invalid request method"}, status=405)
 
-            if not html_url:
-                return JsonResponse({"error": "缺少 HTML URL"}, status=400)
+    try:
+        json_resume_url = request.POST.get("json_resume", "").strip().strip('"')
+        theme = request.POST.get("theme", "flat").strip()
 
-            # 下载 HTML 文件
-            response = requests.get(html_url)
-            if response.status_code != 200:
-                return JsonResponse({"error": "无法下载 HTML 文件"}, status=400)
+        if not json_resume_url:
+            return JsonResponse({"error": "缺少 JSON Resume 数据"}, status=400)
 
-            html_content = response.text  # 获取 HTML 内容
+        # 解析 S3 路径
+        json_resume_key = json_resume_url.replace(S3_BASE_URL, "")
+        temp_json = os.path.join(settings.BASE_DIR, "resume.json")
 
-            # 生成带日期的文件路径
-            current_date = datetime.utcnow().strftime("%Y/%m/%d")  # 按日期存储
-            pdf_key = f"resumes/{current_date}/{uuid.uuid4().hex}.pdf"
-            temp_pdf_path = os.path.join("/tmp", pdf_key)
+        # 下载 JSON Resume 文件到本地
+        s3_client.download_file(AWS_STORAGE_BUCKET_NAME, json_resume_key, temp_json)
 
-            # 生成 PDF
-            generate_pdf_from_html(html_content, temp_pdf_path)
+        # 读取 JSON Resume 数据
+        with open(temp_json, "r", encoding="utf-8") as f:
+            json_resume = json.load(f)
 
-            # 上传 PDF 到 S3
-            s3_client.upload_file(temp_pdf_path, AWS_STORAGE_BUCKET_NAME, pdf_key,
-                                  ExtraArgs={"ContentType": "application/pdf"})
+        # 生成 PDF
+        temp_pdf = generate_pdf_from_json_resume(json_resume, theme)
 
-            os.remove(temp_pdf_path)  # 删除临时文件
+        # 生成带日期的文件路径
+        current_date = datetime.utcnow().strftime("%Y/%m/%d")
+        pdf_key = f"resumes/{current_date}/{uuid.uuid4().hex}.pdf"
 
-            pdf_url = f"{S3_BASE_URL}{pdf_key}"
-            return JsonResponse({"pdf_url": pdf_url})
+        # 上传 PDF 到 S3
+        s3_client.upload_file(temp_pdf, AWS_STORAGE_BUCKET_NAME, pdf_key, ExtraArgs={"ContentType": "application/pdf"})
 
-        except Exception as e:
-            return JsonResponse({"error": str(e)}, status=500)
+        # 清理临时文件
+        os.remove(temp_json)
+        os.remove(temp_pdf)
 
-    return JsonResponse({"error": "Invalid request method"}, status=405)
+        pdf_url = f"{S3_BASE_URL}{pdf_key}"
+        return JsonResponse({"pdf_url": pdf_url})
 
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
 
-
+@login_required
 class AlipayViewSet(ModelViewSet):
     queryset = AlipayOrder.objects.all()
     serializer_class = AlipayOrderSerializer
@@ -345,7 +486,7 @@ class AlipayViewSet(ModelViewSet):
         order = self.get_object()
         url = generate_alipay_url(order.out_trade_no, order.total_amount)
         return Response({"pay_url": url})
-
+@login_required
 class WeChatViewSet(ModelViewSet):
     queryset = WeChatOrder.objects.all()
     serializer_class = WeChatOrderSerializer
@@ -355,7 +496,7 @@ class WeChatViewSet(ModelViewSet):
         order = self.get_object()
         qr_code = generate_wechat_qr(order.out_trade_no, order.total_fee)
         return Response({"qr_code": qr_code})
-
+@login_required
 class StripeViewSet(ModelViewSet):
     queryset = StripeOrder.objects.all()
     serializer_class = StripeOrderSerializer

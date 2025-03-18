@@ -2,13 +2,14 @@ import subprocess
 import requests
 import asyncio
 import re
-from django.conf import settings
 from playwright.async_api import async_playwright
 from pdf2docx import Converter  # 新增 pdf2docx
+import time
 import json
 import os
-from django.shortcuts import render, redirect
-from payments import get_payment_model, RedirectNeeded
+import datetime
+import redis
+from django.conf import settings
 
 def generate_resume_prompt(user_input,customized_info):
     """
@@ -281,6 +282,64 @@ def generate_html_from_json_resume(json_resume, theme="flat"):
     return html_content
 
 
+def generate_pdf_from_json_resume(json_resume, theme="flat"):
+    """
+    根据 JSON Resume 生成 PDF 文件
+    """
+    THEME_PATHS = {
+        'flat': 'jsonresume-theme-flat',
+        'kendall': 'jsonresume-theme-kendall',
+        'macchiato': 'jsonresume-theme-macchiato',
+        'relaxed': 'jsonresume-theme-relaxed',
+        'stackoverflow': 'jsonresume-theme-stackoverflow',
+        'professional': "./node_modules/jsonresume-theme-professional/build",
+        'engineering': "./node_modules/jsonresume-theme-engineering"
+    }
+    selected_theme_path = THEME_PATHS.get(theme, 'jsonresume-theme-flat')
+    print(f"使用主题路径：{selected_theme_path}")
+
+    temp_json = os.path.join(settings.BASE_DIR, "resume.json")
+    temp_pdf = os.path.join(settings.BASE_DIR, "resume.pdf")
+
+    # 保存 JSON Resume 到临时文件
+    with open(temp_json, "w", encoding="utf-8") as f:
+        json.dump(json_resume, f, ensure_ascii=False, indent=4)
+
+    # 设置环境变量，确保 `resume-cli` 能找到 `node_modules`
+    env = os.environ.copy()
+    env["NODE_PATH"] = os.path.join(settings.BASE_DIR, "node_modules")
+
+    # 使用 `resume export` 生成 PDF
+    cmd = [
+        "resume", "export", temp_pdf,
+        "--theme", selected_theme_path,
+        "--format", "pdf",
+        temp_json
+    ]
+
+    try:
+        print(f"执行命令: {' '.join(cmd)}")
+        subprocess.run(cmd, cwd=settings.BASE_DIR, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, check=True)
+
+        # 确保 PDF 生成
+        pdf_wait_time = 0
+        max_wait_time = 20  # 最长等待 20 秒
+        while not os.path.exists(temp_pdf) and pdf_wait_time < max_wait_time:
+            time.sleep(1)
+            pdf_wait_time += 1
+
+        if not os.path.exists(temp_pdf):
+            raise FileNotFoundError(f"resume export 失败，{max_wait_time} 秒后仍未生成 {temp_pdf}")
+
+        print(f"成功生成 PDF: {temp_pdf}，等待时间: {pdf_wait_time} 秒")
+
+    except subprocess.CalledProcessError as e:
+        raise Exception(f"resume export 失败: {e.stderr.decode()}")
+
+    except Exception as e:
+        raise Exception(f"未知错误: {str(e)}")
+
+    return temp_pdf
 def preview_resume_and_save(html_content):
     """
     将生成的 HTML 内容写入到 MEDIA_ROOT 下的 preview_resume.html，
@@ -301,3 +360,37 @@ def convert_pdf_to_docx(pdf_path, docx_path):
     # start=0 表示从第一页开始转换，end=None 表示转换全部页面
     cv.convert(docx_path, start=0, end=None)
     cv.close()
+
+
+# 限流配置（可修改）
+RATE_LIMIT_HOURLY = settings.RATE_LIMIT_HOURLY if hasattr(settings, "RATE_LIMIT_HOURLY") else 10
+RATE_LIMIT_DAILY = settings.RATE_LIMIT_DAILY if hasattr(settings, "RATE_LIMIT_DAILY") else 30
+
+def check_rate_limit(user_id, redis_client):
+    """检查用户的限流情况"""
+    current_hour = datetime.datetime.utcnow().strftime("%Y-%m-%d %H")
+    current_day = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+
+    hourly_key = f"user:{user_id}:requests:{current_hour}"
+    daily_key = f"user:{user_id}:requests:{current_day}"
+
+
+    # 获取当前请求次数
+    hourly_requests = int(redis_client.get(hourly_key) or 0)
+    daily_requests = int(redis_client.get(daily_key) or 0)
+
+    # 如果超过限流，返回 False
+    if hourly_requests >= RATE_LIMIT_HOURLY:
+        return False, f"已达到每小时请求限制 - {RATE_LIMIT_HOURLY}/hour"
+    if daily_requests >= RATE_LIMIT_DAILY:
+        return False, f"已达到每日请求限制 - {RATE_LIMIT_DAILY}/day"
+
+    # 更新 Redis 计数
+    redis_client.incr(hourly_key, 1)
+    redis_client.incr(daily_key, 1)
+
+    # 设置过期时间（确保 key 自动过期）
+    redis_client.expire(hourly_key, 3600)  # 1 小时
+    redis_client.expire(daily_key, 86400)  # 24 小时
+
+    return True, ""
